@@ -29,4 +29,42 @@ describe("MatchCard", () => {
     expect(screen.getByText("India need 12 runs")).toBeInTheDocument();
     expect(onClick).toHaveBeenCalledWith(baseMatch);
   });
+
+  it("shows only the result text for recent matches", () => {
+    render(
+      <MatchCard
+        activeTab="recent"
+        match={{
+          ...baseMatch,
+          date: "1786543200000",
+          result: "India won by 24 runs",
+          status: "completed",
+          status_text: "Completed",
+        }}
+        onClick={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("India won by 24 runs")).toBeInTheDocument();
+    expect(screen.getByText("Aug 12")).toBeInTheDocument();
+    expect(screen.queryByText("Aug 12, 07:30 PM")).not.toBeInTheDocument();
+    expect(screen.queryByText("Completed")).not.toBeInTheDocument();
+  });
+
+  it("shows date and time for upcoming matches", () => {
+    render(
+      <MatchCard
+        activeTab="upcoming"
+        match={{
+          ...baseMatch,
+          date: 1786543200000,
+          status: "upcoming",
+          status_text: "Match starts at Aug 12, 02:00 PM GMT",
+        }}
+        onClick={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Aug 12, 07:30 PM")).toBeInTheDocument();
+  });
 });

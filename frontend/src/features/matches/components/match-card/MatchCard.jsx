@@ -1,4 +1,10 @@
-import { formatMatchType, formatScore } from "../../../../utils";
+import { Fragment } from "react";
+import {
+  formatDate,
+  formatDateWithoutTime,
+  formatMatchType,
+  formatScore,
+} from "../../../../utils";
 import { normalizeMatchStatus } from "../../utils/matchStatus";
 
 function statusLabel(status) {
@@ -16,51 +22,47 @@ function statusClasses(status) {
   return "bg-cbupcoming/15 text-cbupcoming";
 }
 
-function ScoreColumn({ compact = false, scores }) {
-  if (!scores?.length) return null;
-
+function TeamRows({ compact = false, match }) {
   return (
-    <div className={`shrink-0 text-right ${compact ? "mt-4" : ""}`}>
-      <div className="space-y-1">
-        {scores.map((score, index) => (
-          <p
-            key={`${score.team || "score"}-${index}`}
-            className={`font-bold ${
-              index === 0
-                ? `${compact ? "text-xl" : "text-2xl"} text-cblive`
-                : `${compact ? "text-lg" : "text-xl"} text-cbcompleted`
-            }`}
-          >
-            {formatScore(score.runs, score.wickets, score.overs)}
-          </p>
-        ))}
-      </div>
-      {scores.length === 1 && scores[0].overs > 0 && (
-        <p className="mt-1 text-sm text-cbmuted">{scores[0].overs} overs</p>
-      )}
-    </div>
-  );
-}
-
-function TeamNames({ match }) {
-  return (
-    <div className="space-y-1">
+    <div className="grid grid-cols-[minmax(0,1fr)_auto] items-baseline gap-x-4 gap-y-1">
       {match.teams.map((team, index) => (
-        <h3
-          key={`${team}-${index}`}
-          className="text-lg font-bold leading-tight text-cbtext sm:text-xl"
-        >
-          {team}
-        </h3>
+        <Fragment key={`${team}-${index}`}>
+          <h3 className="min-w-0 text-lg font-bold leading-tight text-cbtext sm:text-xl">
+            {team}
+          </h3>
+          {match.scores?.[index] ? (
+            <p
+              className={`whitespace-nowrap text-right font-bold ${
+                index === 0
+                  ? `${compact ? "text-xl" : "text-2xl"} text-cblive`
+                  : `${compact ? "text-lg" : "text-xl"} text-cbcompleted`
+              }`}
+            >
+              {formatScore(
+                match.scores[index].runs,
+                match.scores[index].wickets,
+                match.scores[index].overs,
+              )}
+            </p>
+          ) : (
+            <span aria-hidden="true" />
+          )}
+        </Fragment>
       ))}
     </div>
   );
 }
 
-export default function MatchCard({ layout = "list", match, onClick }) {
+export default function MatchCard({ activeTab, layout = "list", match, onClick }) {
   const firstScore = match.scores?.[0];
   const compact = layout === "cards";
   const matchStatus = normalizeMatchStatus(match.status);
+  const summaryText =
+    activeTab === "recent" ? match.result : match.status_text || match.result;
+  const dateLabel =
+    matchStatus === "completed"
+      ? formatDateWithoutTime(match.date)
+      : formatDate(match.date);
 
   return (
     <button
@@ -97,26 +99,19 @@ export default function MatchCard({ layout = "list", match, onClick }) {
         </span>
       </div>
 
-      <div
-        className={`${
-          compact
-            ? "block"
-            : "flex items-center justify-between gap-4"
-        }`}
-      >
+      <div>
         <div className="min-w-0">
-          <TeamNames match={match} />
-          {match.status_text && (
-            <p className="mt-4 text-sm text-cbmuted">{match.status_text}</p>
+          <TeamRows compact={compact} match={match} />
+          {summaryText && (
+            <p className="mt-4 text-sm text-cbmuted">{summaryText}</p>
           )}
-          {match.result && (
-            <p className="mt-4 text-sm text-cbmuted">{match.result}</p>
+          {matchStatus !== "live" && dateLabel && (
+            <p className="mt-2 text-sm text-cbmuted">{dateLabel}</p>
           )}
           {match.venue && (
             <p className="mt-2 text-sm text-cbmuted">{match.venue}</p>
           )}
         </div>
-        <ScoreColumn compact={compact} scores={match.scores} />
       </div>
     </button>
   );

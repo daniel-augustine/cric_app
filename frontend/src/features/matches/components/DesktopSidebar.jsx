@@ -3,6 +3,7 @@ import { MATCH_TABS } from "../constants";
 export default function DesktopSidebar({
   activeTab,
   activeCount,
+  leagueTotalCount,
   leagues,
   onSeriesChange,
   onTabChange,
@@ -49,7 +50,7 @@ export default function DesktopSidebar({
               }`}
             >
               <span>All leagues</span>
-              <span className="text-xs">{activeCount}</span>
+              <span className="text-xs">{leagueTotalCount}</span>
             </button>
             {leagues.map((league) => (
               <button

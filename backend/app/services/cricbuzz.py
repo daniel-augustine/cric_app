@@ -2,6 +2,7 @@ import json
 from logging import info
 import re
 from datetime import datetime, timezone
+from html import unescape
 from typing import Optional
 
 import httpx
@@ -33,8 +34,6 @@ def _guess_match_type(match_info: str) -> str:
         return "Test"
     if "odi" in info_lower or "one-day" in info_lower:
         return "ODI"
-    if "THE HUNDRED" in match_info.upper():
-        return "The Hundred"
     return "T20"
 
 
@@ -51,6 +50,103 @@ def _determine_status(status_text: str) -> str:
     if "preview" in lower:
         return "upcoming"
     return "live"
+
+
+def _normalize_match_format(match_format: str, match_desc: str = "", series: str = "") -> str:
+    text = " ".join([match_format, match_desc, series]).lower()
+    if "test" in text:
+        return "Test"
+    if "odi" in text:
+        return "ODI"
+    return "T20"
+
+
+def _extract_json_object(text: str, start: int) -> Optional[str]:
+    depth = 0
+    in_string = False
+    escaped = False
+
+    for i in range(start, len(text)):
+        char = text[i]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
+
+    return None
+
+
+def _extract_embedded_matches(page_html: str) -> list[dict]:
+    page_text = unescape(page_html).replace('\\"', '"')
+    matches: list[dict] = []
+    markers = ('"match":{', '{"matchInfo":')
+
+    for marker in markers:
+        pos = 0
+
+        while True:
+            marker_pos = page_text.find(marker, pos)
+            if marker_pos == -1:
+                break
+
+            if marker == '"match":{':
+                object_start = page_text.find("{", marker_pos + len('"match":'))
+            else:
+                object_start = marker_pos
+            if object_start == -1:
+                break
+
+            object_text = _extract_json_object(page_text, object_start)
+            if object_text is None:
+                pos = marker_pos + len(marker)
+                continue
+
+            try:
+                match_obj = json.loads(object_text)
+            except json.JSONDecodeError:
+                pos = object_start + 1
+                continue
+
+            if isinstance(match_obj, dict) and isinstance(match_obj.get("matchInfo"), dict):
+                matches.append(match_obj)
+
+            pos = object_start + len(object_text)
+
+    return matches
+
+
+def _build_team_score(team: str, score_data: Optional[dict]) -> TeamScore:
+    if not isinstance(score_data, dict):
+        return TeamScore(team=team)
+
+    innings = [
+        innings_data
+        for key, innings_data in score_data.items()
+        if key.startswith("inngs") and isinstance(innings_data, dict)
+    ]
+    innings.sort(key=lambda item: item.get("inningsId", 0))
+
+    if not innings:
+        return TeamScore(team=team)
+
+    runs = sum(int(item.get("runs") or 0) for item in innings)
+    wickets = sum(int(item.get("wickets") or 0) for item in innings)
+    overs = sum(float(item.get("overs") or 0.0) for item in innings)
+
+    return TeamScore(team=team, runs=runs, wickets=wickets, overs=overs)
 
 
 async def fetch_live_matches() -> list[Match]:
@@ -280,6 +376,60 @@ async def fetch_recent_matches() -> list[Match]:
         resp = await client.get(RECENT_URL, headers=HEADERS, timeout=15.0)
         resp.raise_for_status()
 
+    embedded_matches = _extract_embedded_matches(resp.text)
+    if embedded_matches:
+        matches: list[Match] = []
+        seen_ids: set[str] = set()
+
+        for match_obj in embedded_matches:
+            info = match_obj["matchInfo"]
+            state = str(info.get("state") or "")
+            if state.lower() not in {"complete", "completed"}:
+                continue
+
+            match_id = str(info.get("matchId") or "")
+            if not match_id or match_id in seen_ids:
+                continue
+            seen_ids.add(match_id)
+
+            team_a = info.get("team1", {}).get("teamName", "")
+            team_b = info.get("team2", {}).get("teamName", "")
+            teams = [team for team in [team_a, team_b] if team]
+            if len(teams) < 2:
+                continue
+
+            score = match_obj.get("matchScore") or {}
+            venue_info = info.get("venueInfo") or {}
+            venue = ", ".join(
+                part for part in [venue_info.get("ground"), venue_info.get("city")] if part
+            )
+            result = str(info.get("status") or "")
+            match_desc = str(info.get("matchDesc") or "")
+            series = str(info.get("seriesName") or "")
+
+            matches.append(
+                Match(
+                    id=f"cb-{match_id}",
+                    teams=teams,
+                    scores=[
+                        _build_team_score(team_a, score.get("team1Score")),
+                        _build_team_score(team_b, score.get("team2Score")),
+                    ],
+                    status="completed",
+                    status_text=result,
+                    result=result,
+                    venue=venue,
+                    date=int(info["startDate"]) if info.get("startDate") else None,
+                    series=series,
+                    match_type=_normalize_match_format(
+                        str(info.get("matchFormat") or ""), match_desc, series
+                    ),
+                    summary=match_desc,
+                )
+            )
+
+        return matches
+
     soup = BeautifulSoup(resp.text, "lxml")
     matches: list[Match] = []
     seen_ids: set[str] = set()
@@ -309,7 +459,7 @@ async def fetch_recent_matches() -> list[Match]:
         venue_parts = [p for p in parts[6:] if p != ","]
         venue = ", ".join(venue_parts) if venue_parts else ""
 
-        match_type = _guess_match_type(match_desc)
+        match_type = _normalize_match_format("", match_desc)
 
         matches.append(
             Match(
@@ -325,7 +475,8 @@ async def fetch_recent_matches() -> list[Match]:
                 summary=match_desc,
             )
         )
-        return matches
+
+    return matches
 
 SCORECARD_BASE = "https://www.cricbuzz.com/live-cricket-scorecard"
 

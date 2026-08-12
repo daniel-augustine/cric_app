@@ -14,10 +14,18 @@ export function getStatusColor(status) {
   return 'bg-cbcompleted';
 }
 
+function parseDateValue(value) {
+  if (!value) return null;
+  const dateValue =
+    typeof value === 'string' && /^\d+$/.test(value) ? Number(value) : value;
+  const d = new Date(dateValue);
+  if (Number.isNaN(d.getTime())) return null;
+  return d;
+}
+
 export function formatDate(dateStr) {
-  if (!dateStr) return '';
-  const d = new Date(dateStr);
-  if (Number.isNaN(d.getTime())) return '';
+  const d = parseDateValue(dateStr);
+  if (!d) return '';
   return d.toLocaleString('en-US', {
     month: 'short',
     day: 'numeric',
@@ -28,9 +36,8 @@ export function formatDate(dateStr) {
 }
 
 export function formatDateWithoutTime(dateStr) {
-  if (!dateStr) return '';
-  const d = new Date(dateStr);
-  if (Number.isNaN(d.getTime())) return '';
+  const d = parseDateValue(dateStr);
+  if (!d) return '';
   return d.toLocaleString('en-US', {
     month: 'short',
     day: 'numeric',
