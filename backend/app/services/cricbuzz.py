@@ -2,6 +2,7 @@ import json
 from logging import info
 import re
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
 import httpx
@@ -29,7 +30,7 @@ def _parse_overs(overs_str: str) -> float:
 
 def _guess_match_type(match_info: str) -> str:
     info_lower = match_info.lower()
-    if "test" in info_lower:
+    if "test" in info_lower or ("Stumps" in match_info and "Day" in match_info):
         return "Test"
     if "odi" in info_lower or "one-day" in info_lower:
         return "ODI"
@@ -99,7 +100,7 @@ async def fetch_live_matches() -> list[Match]:
             score_match = re.match(r"^(\d+)(?:-(\d+))?\s*\((.+?)\)", part)
             if score_match and i >= 2:
                 runs = int(score_match.group(1))
-                wickets = int(score_match.group(2)) if score_match.group(2) is not None else 0
+                wickets = int(score_match.group(2)) if score_match.group(2) is not None else 10
                 overs = _parse_overs(score_match.group(3))
                 team_name = parts[i - 2]
                 score_first_innings_index = i
@@ -113,7 +114,7 @@ async def fetch_live_matches() -> list[Match]:
                 )
             elif any(
                 kw in part.lower()
-                for kw in ["won", "need", "innings", "preview", "stumped", "tied", "drawn"]
+                for kw in ["won", "need", "innings", "preview", "stumped", "tied", "drawn","stumps"]
             ):
                 status_text = part
             i += 1
@@ -133,6 +134,7 @@ async def fetch_live_matches() -> list[Match]:
             continue
 
         status = _determine_status(status_text)
+        match_info = match_info.split("•", 1)[0].strip() if "•" in match_info else match_info.strip()
 
         if not status=="completed":
             matches.append(
@@ -161,11 +163,9 @@ def extract_match_times(page_html: str) -> dict[str, int]:
     for match in pattern.finditer(page_html):
         match_id = match.group(1)
         start_ms = int(match.group(2))
-        print(f"Found match {match_id} starting at {start_ms}")
         if match_id in match_times:
             continue
         match_times[match_id] = start_ms
-        print(f"Added match times {match_times}")
 
     return match_times
 
@@ -385,11 +385,8 @@ def _build_innings_from_json(inn_data: dict, innings_idx: int) -> Innings:
     batsmen = bat.get("batsmenData", {})
     for key in sorted(batsmen.keys()):
         b = batsmen[key]
-        # print(b)
         out_desc = b.get("outDesc", "")
-        # print(f"out_desc: {out_desc}")
         is_batting = "batting" in out_desc.lower()
-        # print(f"is_batting: {is_batting}")
         is_out = bool(out_desc) and "not out" not in out_desc.lower() and not is_batting
 
         batting_list.append(
