@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { formatDate, formatMatchType, formatScore, getStatusColor } from "./utils";
+import {
+  formatDate,
+  formatDateWithoutTime,
+  formatMatchType,
+  formatScore,
+  getStatusColor,
+} from "./utils";
 
 describe("formatting utilities", () => {
   it("formats scores and yet-to-bat innings", () => {
@@ -21,5 +27,11 @@ describe("formatting utilities", () => {
   it("returns an empty date label for missing or invalid dates", () => {
     expect(formatDate()).toBe("");
     expect(formatDate("not-a-date")).toBe("");
+  });
+
+  it("formats Cricbuzz millisecond timestamps", () => {
+    expect(formatDate(1786543200000)).toContain("Aug");
+    expect(formatDate("1786543200000")).toContain("Aug");
+    expect(formatDateWithoutTime("1786543200000")).toContain("Aug");
   });
 });

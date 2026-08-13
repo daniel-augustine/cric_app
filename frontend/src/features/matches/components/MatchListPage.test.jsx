@@ -11,7 +11,7 @@ const match = {
   status: "upcoming",
   teams: ["India", "Sri Lanka"],
   scores: [],
-  date: "2026-08-05T14:00:00Z",
+  date: "2099-08-05T14:00:00Z",
 };
 
 const odiMatch = {
@@ -174,6 +174,7 @@ describe("MatchListPage", () => {
     expect(screen.getByText("Filtered by Champions Trophy")).toBeInTheDocument();
     expect(screen.queryByText("India")).not.toBeInTheDocument();
     expect(screen.getByText("Pakistan")).toBeInTheDocument();
+    expect(screen.getByText("All leagues").nextSibling).toHaveTextContent("2");
 
     await userEvent.click(screen.getByRole("button", { name: "Clear" }));
     expect(screen.getByText("India")).toBeInTheDocument();

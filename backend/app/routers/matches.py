@@ -37,10 +37,12 @@ async def get_upcoming_matches() -> list[Match]:
 async def get_recent_matches() -> list[Match]:
     try:
         recent = await fetch_recent_matches()
-        if recent:
-            return recent
-    except Exception:
-        pass
+        return recent
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to fetch recent matches: {str(e)}",
+        )
 
 
 @router.get("/{match_id}", response_model=Match)
@@ -82,4 +84,3 @@ async def get_all_matches() -> list[Match]:
             status_code=500,
             detail=f"Failed to fetch matches: {str(e)}",
         )
-    

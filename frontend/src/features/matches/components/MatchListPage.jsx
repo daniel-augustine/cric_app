@@ -72,6 +72,7 @@ export default function MatchListPage({
           <DesktopSidebar
             activeCount={filteredMatches.length}
             activeTab={activeTab}
+            leagueTotalCount={tabMatches.length}
             leagues={leagues}
             onSeriesChange={setSelectedSeries}
             onTabChange={onTabChange}
@@ -137,6 +138,7 @@ export default function MatchListPage({
               />
             ) : (
               <MatchGrid
+                activeTab={activeTab}
                 layout={activeLayout}
                 matches={filteredMatches}
                 onMatchClick={onMatchClick}
