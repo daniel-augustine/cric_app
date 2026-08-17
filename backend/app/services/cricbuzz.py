@@ -208,7 +208,7 @@ async def fetch_live_matches() -> list[Match]:
 
 
 # ---------------------------------------------------------------------------
-# Shared helpers (used by the DOM fallback and the upcoming/recent endpoints)
+# Legacy DOM fallback (kept for resilience if the JSON payload disappears).
 # ---------------------------------------------------------------------------
 
 # Score token: "250-4 (45.0)", "450-8 d (130.0)", "416 (135.2)", or bare "96-1"/"198".
