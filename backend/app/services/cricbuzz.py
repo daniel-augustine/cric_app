@@ -22,18 +22,209 @@ RECENT_URL = "https://www.cricbuzz.com/cricket-scorecard-archives"
 
 
 def _parse_overs(overs_str: str) -> float:
-    cleaned = overs_str.replace("Balls", "").strip()
+    cleaned = str(overs_str).replace("Balls", "").strip()
     try:
+        if ".6" in cleaned:
+            cleaned = cleaned.replace(".6", ".0")
+            return float(cleaned) + 1.0
         return float(cleaned)
     except ValueError:
         return 0.0
 
 
+# ---------------------------------------------------------------------------
+# Live matches: primary path parses the structured JSON embedded in the page.
+#
+# Cricbuzz is a Next.js app; the live page ships the full match data (format,
+# state, status, exact scores) as JSON inside its script payload. The rendered
+# DOM omits overs for Test innings (e.g. "198", "96-1" with no "(overs)"), so
+# any text-scrape that keys on "(...)" silently drops Tests. The JSON has
+# everything unambiguously, including matchFormat=TEST, so we use it directly.
+# ---------------------------------------------------------------------------
+
+_FORMAT_MAP = {
+    "TEST": "Test", "FC": "Test",
+    "ODI": "ODI", "ODM": "ODI",
+    "T20": "T20", "T20I": "T20",
+    "HUN": "The Hundred",
+}
+
+
+def _unescape_json_str(s: str) -> str:
+    """Undo the JS-string escaping used in Next.js __next_f payloads."""
+    return (
+        s.replace('\\"', '"')
+        .replace("\\\\", "\\")
+        .replace("\\u0026", "&")
+        .replace("\\u003c", "<")
+        .replace("\\u003e", ">")
+        .replace("\\/", "/")
+    )
+
+
+def _extract_live_matches_json(text: str) -> Optional[list]:
+    """Pull the `"pageType":"live"` matches array out of the page payload.
+
+    Layout in the payload:  {"filters":[...],"matches":[ ... ],"pageType":"live",...}
+    so the matches array is bounded by `"matches":[` and the `]` right before
+    `,"pageType":"live"`. Returns the decoded list, or None if not found.
+    """
+    live_idx = text.find('\\"pageType\\":\\"live\\"')
+    if live_idx < 0:
+        return None
+    filt_idx = text.rfind('\\"filters\\":[', 0, live_idx)
+    if filt_idx < 0:
+        return None
+    m_key = '\\"matches\\":'
+    m_idx = text.find(m_key, filt_idx)
+    if m_idx < 0 or m_idx > live_idx:
+        return None
+    arr_start = m_idx + len(m_key)                  # points at '['
+    arr_end = text.rfind("]", arr_start, live_idx)  # ']' just before ,"pageType"
+    if arr_end < 0:
+        return None
+    raw = text[arr_start:arr_end + 1]
+    try:
+        return json.loads(_unescape_json_str(raw))
+    except json.JSONDecodeError:
+        return None
+
+
+def _status_from_state(state: str, status_str: str) -> str:
+    """Map Cricbuzz state/status to our lifecycle. Breaks (stumps/lunch/tea/
+    innings break/rain) stay 'live' so a Test shows until it actually ends."""
+    low = f"{state} {status_str}".lower()
+    if state.lower() == "complete" or any(
+        k in low for k in ("won", "drawn", "tied", "abandoned", "no result")
+    ):
+        return "completed"
+    if state.lower() in ("upcoming", "preview") or "starts at" in low or "match starts" in low:
+        return "upcoming"
+    return "live"
+
+
+def _latest_innings(team_score: Optional[dict]) -> Optional[dict]:
+    """Return the most recent innings (highest inningsId) for a team, so a
+    Test side that batted twice reports its current innings."""
+    if not team_score:
+        return None
+    best = None
+    for inn in team_score.values():
+        if isinstance(inn, dict) and (best is None or inn.get("inningsId", 0) > best.get("inningsId", 0)):
+            best = inn
+    return best
+
+
+def _team_score_from_json(team_score: Optional[dict], team_name: str) -> TeamScore:
+    inn = _latest_innings(team_score)
+    if not inn:
+        return TeamScore(team=team_name, runs=0, wickets=0, overs=0.0)
+    return TeamScore(
+        team=team_name,
+        runs=inn.get("runs", 0),
+        wickets=inn.get("wickets", 0),
+        overs=_parse_overs(inn.get("overs", 0)),
+    )
+
+
+def _matches_from_live_json(data: list) -> list[Match]:
+    matches: list[Match] = []
+    seen: set[str] = set()
+
+    for block in data:
+        for sm in block.get("seriesMatches", []):
+            wrap = sm.get("seriesAdWrapper") or sm.get("adDetail") or {}
+            series = wrap.get("seriesName", "")
+            for m in wrap.get("matches", []):
+                info_d = m.get("matchInfo", {})
+                score_d = m.get("matchScore", {})
+
+                match_id = str(info_d.get("matchId", ""))
+                if not match_id or match_id in seen:
+                    continue
+                seen.add(match_id)
+
+                status = _status_from_state(info_d.get("state", ""), info_d.get("status", ""))
+                if status != "live":
+                    continue  # live endpoint: skip completed / upcoming
+
+                team1 = info_d.get("team1", {}).get("teamName", "")
+                team2 = info_d.get("team2", {}).get("teamName", "")
+
+                scores = [
+                    _team_score_from_json(score_d.get("team1Score"), team1),
+                    _team_score_from_json(score_d.get("team2Score"), team2),
+                ]
+
+                fmt = str(info_d.get("matchFormat", "")).upper()
+                match_type = _FORMAT_MAP.get(fmt, fmt.title() or "T20")
+
+                venue_info = info_d.get("venueInfo", {})
+                city = venue_info.get("city", "")
+                ground = venue_info.get("ground", "")
+                venue = ", ".join(p for p in (city, ground) if p)
+
+                status_text = info_d.get("status", "") or info_d.get("state", "")
+                start_date = info_d.get("startDate")
+                try:
+                    date_val = int(start_date) if start_date is not None else None
+                except (TypeError, ValueError):
+                    date_val = None
+
+                matches.append(
+                    Match(
+                        id=f"cb-{match_id}",
+                        teams=[team1, team2],
+                        scores=scores,
+                        status=status,
+                        status_text=status_text,
+                        result=None,
+                        venue=venue,
+                        date=date_val,
+                        series=series,
+                        match_type=match_type,
+                        summary=status_text,
+                    )
+                )
+
+    return matches
+
+
+async def fetch_live_matches() -> list[Match]:
+    """Scrape live matches from Cricbuzz (Tests included, kept live until they end)."""
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(LIVE_URL, headers=HEADERS, timeout=15.0)
+        resp.raise_for_status()
+
+    # Primary: structured JSON in the page payload (robust; includes Tests).
+    data = _extract_live_matches_json(resp.text)
+    if data is not None:
+        matches = _matches_from_live_json(data)
+        if matches:
+            return matches
+
+    # Fallback: legacy DOM scrape, in case the payload shape changes.
+    return _fetch_live_matches_from_dom(resp.text)
+
+
+# ---------------------------------------------------------------------------
+# Legacy DOM fallback (kept for resilience if the JSON payload disappears).
+# ---------------------------------------------------------------------------
+
+# Score token: "250-4 (45.0)", "450-8 d (130.0)", "416 (135.2)", or bare "96-1"/"198".
+_SCORE_TOKEN_RE = re.compile(r"(\d+)(?:-(\d+))?(?:\s*(?:d|dec|decl)\b)?(?:\s*\(([^)]+)\))?")
+
+
 def _guess_match_type(match_info: str) -> str:
-    info_lower = match_info.lower()
-    if "test" in info_lower or ("Stumps" in match_info and "Day" in match_info):
+    lower = match_info.lower()
+    if "the hundred" in lower or "hundred" in lower:
+        return "The Hundred"
+    if (
+        "test" in lower or "stumps" in lower or "innings" in lower
+        or " & " in match_info or re.search(r"\bday\s*[1-5]\b", lower)
+    ):
         return "Test"
-    if "odi" in info_lower or "one-day" in info_lower:
+    if "odi" in lower or "one-day" in lower or "one day" in lower:
         return "ODI"
     return "T20"
 
@@ -42,15 +233,6 @@ def _extract_venue(match_info: str) -> str:
     if "•" in match_info:
         return match_info.split("•", 1)[1].strip()
     return match_info
-
-
-def _determine_status(status_text: str) -> str:
-    lower = status_text.lower()
-    if "won" in lower or "won by" in lower:
-        return "completed"
-    if "preview" in lower:
-        return "upcoming"
-    return "live"
 
 
 def _normalize_match_format(match_format: str, match_desc: str = "", series: str = "") -> str:
@@ -150,13 +332,12 @@ def _build_team_score(team: str, score_data: Optional[dict]) -> TeamScore:
     return TeamScore(team=team, runs=runs, wickets=wickets, overs=overs)
 
 
-async def fetch_live_matches() -> list[Match]:
-    """Scrape live matches from Cricbuzz."""
-    async with httpx.AsyncClient() as client:
-        resp = await client.get(LIVE_URL, headers=HEADERS, timeout=15.0)
-        resp.raise_for_status()
+# ---------------------------------------------------------------------------
+# Legacy DOM fallback for live (kept in case the JSON payload shape changes).
+# ---------------------------------------------------------------------------
 
-    soup = BeautifulSoup(resp.text, "lxml")
+def _fetch_live_matches_from_dom(html: str) -> list[Match]:
+    soup = BeautifulSoup(html, "lxml")
     matches: list[Match] = []
     seen_ids: set[str] = set()
 
@@ -164,91 +345,65 @@ async def fetch_live_matches() -> list[Match]:
         if "/live-cricket-scores/" not in a["href"]:
             continue
         text = a.get_text(separator="|", strip=True)
-        if not re.search(r"\d+-\d+\s*\(", text):
+        parts = [p.strip() for p in text.split("|") if p.strip()]
+        # Need at least a header + two team rows to be a real match card.
+        if len(parts) < 4:
             continue
 
         match_id = a["href"].split("/")[2]
         if match_id in seen_ids:
             continue
-        seen_ids.add(match_id)
 
-        series = ""
-        parent = a.parent
-        for _ in range(5):
-            if parent:
-                series_link = parent.find("a", href=True)
-                if series_link and "/cricket-series/" in series_link.get("href", ""):
-                    series = series_link.get_text(strip=True)
-                    break
-                parent = parent.parent
-
-        parts = [p.strip() for p in text.split("|") if p.strip()]
-        match_info = parts[0] if parts else ""
+        match_info = parts[0]
         venue = _extract_venue(match_info)
-        match_type = _guess_match_type(match_info)
 
         scores: list[TeamScore] = []
         status_text = ""
         i = 1
-        score_first_innings_index= 0 
         while i < len(parts):
             part = parts[i]
-            score_match = re.match(r"^(\d+)(?:-(\d+))?\s*\((.+?)\)", part)
-            if score_match and i >= 2:
-                runs = int(score_match.group(1))
-                wickets = int(score_match.group(2)) if score_match.group(2) is not None else 10
-                overs = _parse_overs(score_match.group(3))
-                team_name = parts[i - 2]
-                score_first_innings_index = i
-                scores.append(
-                    TeamScore(
-                        team=team_name,
-                        runs=runs,
-                        wickets=wickets,
-                        overs=overs,
-                    )
-                )
+            tok = _SCORE_TOKEN_RE.fullmatch(part)
+            if tok and i >= 2:
+                runs = int(tok.group(1))
+                wickets = int(tok.group(2)) if tok.group(2) else 10
+                overs = _parse_overs(tok.group(3)) if tok.group(3) else 0.0
+                scores.append(TeamScore(team=parts[i - 2], runs=runs, wickets=wickets, overs=overs))
             elif any(
                 kw in part.lower()
-                for kw in ["won", "need", "innings", "preview", "stumped", "tied", "drawn","stumps"]
+                for kw in ("won", "need", "trail", "lead", "stumps", "lunch", "tea",
+                           "innings", "drawn", "tied", "abandoned", "opt to", "elected")
             ):
                 status_text = part
             i += 1
 
-        if(len(scores) == 1):
-            if (score_first_innings_index >= 1):
-                scores.append(
-                    TeamScore(
-                    team=parts[score_first_innings_index + 1],
-                    runs=0,
-                    wickets=0,
-                    overs=0.0,
-                    )
-                )
-
         if not scores:
             continue
 
-        status = _determine_status(status_text)
-        match_info = match_info.split("•", 1)[0].strip() if "•" in match_info else match_info.strip()
+        seen_ids.add(match_id)
+        status = _status_from_state("", status_text)
+        if status != "live":
+            continue
 
-        if not status=="completed":
-            matches.append(
-                Match(
-                    id=f"cb-{match_id}",
-                    teams=[s.team for s in scores],
-                    scores=scores,
-                    status=status,
-                    status_text=status_text or match_info,
-                    result=status_text if status == "completed" else None,
-                    venue=venue,
-                    series=series,
-                    match_type=match_type,
-                    summary=status_text,
-                )
+        match_info_clean = match_info.split("•", 1)[0].strip()
+        match_type = _guess_match_type(f"{match_info} {status_text}")
+
+        matches.append(
+            Match(
+                id=f"cb-{match_id}",
+                teams=[s.team for s in scores],
+                scores=scores,
+                status=status,
+                status_text=status_text or match_info_clean,
+                result=None,
+                venue=venue,
+                series="",
+                match_type=match_type,
+                summary=status_text,
             )
+        )
 
     return matches
+
 
 def extract_match_times(page_html: str) -> dict[str, int]:
     match_times: dict[str, int] = {}
@@ -281,12 +436,13 @@ def extract_match_times(page_html: str) -> dict[str, int]:
 
     return match_times
 
+
 async def fetch_upcoming_matches() -> list[Match]:
     """Scrape upcoming match schedule from Cricbuzz."""
     async with httpx.AsyncClient() as client:
         resp = await client.get(SCHEDULE_URL, headers=HEADERS, timeout=15.0)
         resp.raise_for_status()
-    
+
     match_time_map = extract_match_times(resp.text)
 
     soup = BeautifulSoup(resp.text, "lxml")
@@ -300,26 +456,20 @@ async def fetch_upcoming_matches() -> list[Match]:
         text = a.get_text(separator="|", strip=True)
         parts = [p.strip() for p in text.split("|") if p.strip()]
 
-        # Only parse schedule entries with venue info:
         # ['Team A', 'vs', 'Team B', ',', 'Match Desc', 'Venue', ',', 'City']
         if len(parts) < 5 or parts[1] != "vs" or parts[3] != ",":
             continue
 
-        match_id = a["href"].split("/")[2]
-        base_id = match_id.rsplit("-", 1)[0] if "-" in match_id else match_id
-
-        # Use the base match ID from href (strip day suffix for tests)
         href_parts = a["href"].split("/")
         if len(href_parts) >= 3:
             raw_id = href_parts[2]
-            time_upcoming = match_time_map.get(raw_id)            
+            time_upcoming = match_time_map.get(raw_id)
         else:
             continue
 
         if raw_id in seen_ids:
             continue
 
-        # Skip if match is currently live
         if "LIVE" in parts:
             continue
 
@@ -327,7 +477,6 @@ async def fetch_upcoming_matches() -> list[Match]:
         team_b = parts[2]
         teams = [team_a, team_b]
 
-        # Everything after the comma is match desc + venue
         after_comma = parts[4:]
         match_desc = after_comma[0] if after_comma else ""
         venue_parts = [p for p in after_comma[1:] if p != ","]
@@ -335,7 +484,6 @@ async def fetch_upcoming_matches() -> list[Match]:
 
         seen_ids.add(raw_id)
 
-        # Find series name from parent
         series = ""
         parent = a.parent
         for _ in range(5):
@@ -346,14 +494,13 @@ async def fetch_upcoming_matches() -> list[Match]:
                     break
                 parent = parent.parent
 
-        # Find date heading before this link
         date_str = ""
         prev_date = a.find_previous(string=re.compile(r"(SUN|MON|TUE|WED|THU|FRI|SAT),", re.I))
         if prev_date:
             date_str = prev_date.strip()
 
-        match_type = _guess_match_type(match_desc)    
-        
+        match_type = _guess_match_type(match_desc)
+
         matches.append(
             Match(
                 id=f"cb-{raw_id}",
@@ -362,7 +509,6 @@ async def fetch_upcoming_matches() -> list[Match]:
                 status="upcoming",
                 status_text=f"Upcoming - {date_str}" if date_str else "Upcoming",
                 venue=venue,
-                #date=datetime.now(timezone.utc),
                 date=time_upcoming,
                 series=series,
                 match_type=match_type,
@@ -371,6 +517,7 @@ async def fetch_upcoming_matches() -> list[Match]:
         )
 
     return matches
+
 
 async def fetch_recent_matches() -> list[Match]:
     """Scrape recent match results from Cricbuzz."""
@@ -443,7 +590,6 @@ async def fetch_recent_matches() -> list[Match]:
         text = a.get_text(separator="|", strip=True)
         parts = [p.strip() for p in text.split("|") if p.strip()]
 
-        # Only parse entries with at least 5 parts (team1, vs, team2, , result)
         if len(parts) < 5 or parts[1] != "vs" or parts[3] != ",":
             continue
 
@@ -479,6 +625,7 @@ async def fetch_recent_matches() -> list[Match]:
         )
 
     return matches
+
 
 SCORECARD_BASE = "https://www.cricbuzz.com/live-cricket-scorecard"
 
